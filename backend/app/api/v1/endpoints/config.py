@@ -6,7 +6,8 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from pydantic import BaseModel
+from app.services.llm.types import trusted_model_endpoint
+from pydantic import field_validator, BaseModel
 import json
 
 from app.api import deps
@@ -14,7 +15,7 @@ from app.db.session import get_db
 from app.models.user_config import UserConfig
 from app.models.user import User
 from app.core.config import settings
-from app.core.encryption import encrypt_sensitive_data, decrypt_sensitive_data
+from app.core.encryption import encrypt_sensitive_data, decrypt_sensitive_data, without_embedding_key
 
 router = APIRouter()
 
@@ -24,7 +25,7 @@ SENSITIVE_LLM_FIELDS = [
     'qwenApiKey', 'deepseekApiKey', 'zhipuApiKey', 'moonshotApiKey',
     'baiduApiKey', 'minimaxApiKey', 'doubaoApiKey'
 ]
-SENSITIVE_OTHER_FIELDS = ['githubToken', 'gitlabToken']
+SENSITIVE_OTHER_FIELDS = ['githubToken', 'gitlabToken', 'giteaToken']
 
 
 def encrypt_config(config: dict, sensitive_fields: list) -> dict:
@@ -76,11 +77,14 @@ class LLMConfigSchema(BaseModel):
     doubaoApiKey: Optional[str] = None
     ollamaBaseUrl: Optional[str] = None
 
+    _check_endpoint = field_validator("llmBaseUrl", "ollamaBaseUrl")(trusted_model_endpoint)
+
 
 class OtherConfigSchema(BaseModel):
     """其他配置Schema"""
     githubToken: Optional[str] = None
     gitlabToken: Optional[str] = None
+    giteaToken: Optional[str] = None
     maxAnalyzeFiles: Optional[int] = None
     llmConcurrency: Optional[int] = None
     llmGapMs: Optional[int] = None
@@ -111,7 +115,7 @@ def get_default_config() -> dict:
     return {
         "llmConfig": {
             "llmProvider": settings.LLM_PROVIDER,
-            "llmApiKey": "",
+            **dict.fromkeys(SENSITIVE_LLM_FIELDS, ""),
             "llmModel": settings.LLM_MODEL or "",
             "llmBaseUrl": settings.LLM_BASE_URL or "",
             "llmTimeout": settings.LLM_TIMEOUT * 1000,  # 转换为毫秒
@@ -125,21 +129,10 @@ def get_default_config() -> dict:
             "subAgentTimeout": getattr(settings, 'SUB_AGENT_TIMEOUT_SECONDS', 600),
             "toolTimeout": getattr(settings, 'TOOL_TIMEOUT_SECONDS', 60),
             # 平台专用配置
-            "geminiApiKey": settings.GEMINI_API_KEY or "",
-            "openaiApiKey": settings.OPENAI_API_KEY or "",
-            "claudeApiKey": settings.CLAUDE_API_KEY or "",
-            "qwenApiKey": settings.QWEN_API_KEY or "",
-            "deepseekApiKey": settings.DEEPSEEK_API_KEY or "",
-            "zhipuApiKey": settings.ZHIPU_API_KEY or "",
-            "moonshotApiKey": settings.MOONSHOT_API_KEY or "",
-            "baiduApiKey": settings.BAIDU_API_KEY or "",
-            "minimaxApiKey": settings.MINIMAX_API_KEY or "",
-            "doubaoApiKey": settings.DOUBAO_API_KEY or "",
             "ollamaBaseUrl": settings.OLLAMA_BASE_URL or "http://localhost:11434/v1",
         },
         "otherConfig": {
-            "githubToken": settings.GITHUB_TOKEN or "",
-            "gitlabToken": settings.GITLAB_TOKEN or "",
+            **dict.fromkeys(SENSITIVE_OTHER_FIELDS, ""),
             "maxAnalyzeFiles": settings.MAX_ANALYZE_FILES,
             "llmConcurrency": settings.LLM_CONCURRENCY,
             "llmGapMs": settings.LLM_GAP_MS,
@@ -151,7 +144,7 @@ def get_default_config() -> dict:
 @router.get("/defaults")
 async def get_default_config_endpoint() -> Any:
     """获取系统默认配置（无需认证）"""
-    return get_default_config()
+    return {**get_default_config(), "publicRegistrationEnabled": settings.PUBLIC_REGISTRATION_ENABLED}
 
 
 @router.get("/me", response_model=UserConfigResponse)
@@ -193,7 +186,7 @@ async def get_my_config(
     print(f"  - llmModel: {user_llm_config.get('llmModel')}")
     
     merged_llm_config = {**default_config["llmConfig"], **user_llm_config}
-    merged_other_config = {**default_config["otherConfig"], **user_other_config}
+    merged_other_config = {**default_config["otherConfig"], **without_embedding_key(user_other_config)}
     
     return UserConfigResponse(
         id=config.id,
@@ -262,7 +255,7 @@ async def update_my_config(
     user_other_config = decrypt_config(user_other_config, SENSITIVE_OTHER_FIELDS)
     
     merged_llm_config = {**default_config["llmConfig"], **user_llm_config}
-    merged_other_config = {**default_config["otherConfig"], **user_other_config}
+    merged_other_config = {**default_config["otherConfig"], **without_embedding_key(user_other_config)}
     
     return UserConfigResponse(
         id=config.id,
@@ -298,6 +291,8 @@ class LLMTestRequest(BaseModel):
     apiKey: str
     model: Optional[str] = None
     baseUrl: Optional[str] = None
+
+    _check_endpoint = field_validator("baseUrl")(trusted_model_endpoint)
 
 
 class LLMTestResponse(BaseModel):
@@ -453,12 +448,19 @@ async def test_llm_connection(
         )
 
         print(f"[LLM Test] 发送测试请求...")
-        response = await adapter.complete(test_request)
+        try:
+            response = await adapter.complete(test_request)
+        finally:
+            await adapter.close()
 
         elapsed_time = time.time() - start_time
         debug_info["elapsed_time_ms"] = round(elapsed_time * 1000, 2)
 
         # 验证响应内容
+        if response and response.finish_reason == "length":
+            debug_info["finish_reason"] = "length"
+            return LLMTestResponse(success=True, model=model, debug=debug_info,
+                                   message=f"连接成功，模型达到 {test_max_tokens} tokens 输出上限")
         if not response or not response.content:
             debug_info["error_type"] = "empty_response"
             debug_info["raw_response"] = str(response) if response else None

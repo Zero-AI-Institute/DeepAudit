@@ -55,6 +55,8 @@ async def register(
     """
     Register a new user.
     """
+    if not settings.PUBLIC_REGISTRATION_ENABLED:
+        raise HTTPException(status_code=403, detail="公开注册已关闭，请联系管理员创建账户")
     # Check if user already exists
     result = await db.execute(select(User).where(User.email == user_in.email))
     existing_user = result.scalars().first()
@@ -64,19 +66,14 @@ async def register(
             detail="该邮箱已被注册",
         )
     
-    # Check if this is the first user (make them admin)
-    count_result = await db.execute(select(User))
-    all_users = count_result.scalars().all()
-    is_first_user = len(all_users) == 0
-    
     # Create new user
     db_user = User(
         email=user_in.email,
         hashed_password=security.get_password_hash(user_in.password),
         full_name=user_in.full_name,
         is_active=True,
-        is_superuser=is_first_user,
-        role="admin" if is_first_user else "member",
+        is_superuser=False,
+        role="member",
     )
     db.add(db_user)
     await db.commit()

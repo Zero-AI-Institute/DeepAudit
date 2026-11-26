@@ -1,5 +1,5 @@
 from typing import List, Union, Optional
-from pydantic import AnyHttpUrl, validator
+from pydantic import AnyHttpUrl, EmailStr, Field, SecretStr, field_validator, validator
 from pydantic_settings import BaseSettings
 
 
@@ -8,10 +8,29 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     
     # SECURITY
-    SECRET_KEY: str = "changethis_in_production_to_a_long_random_string"
+    SECRET_KEY: str = Field(repr=False)
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 8  # 8 days
     
+    PUBLIC_REGISTRATION_ENABLED: bool = True
+    BOOTSTRAP_ADMIN_EMAIL: EmailStr | None = None
+    BOOTSTRAP_ADMIN_PASSWORD: SecretStr | None = None
+
+    @field_validator("SECRET_KEY")
+    @classmethod
+    def validate_secret_key(cls, value: str) -> str:
+        key = value.strip()
+        if len(key.encode("utf-8")) < 32 or key.lower() in {
+            "changethis_in_production_to_a_long_random_string",
+            "your-super-secret-key-change-this-in-production",
+            "your-random-secret-key-at-least-32-characters",
+        }:
+            raise ValueError(
+                "Set SECRET_KEY to a deployment-specific random secret of at least 32 bytes. "
+                "Generate one with openssl rand -hex 32."
+            )
+        return value
+
     # CORS
     BACKEND_CORS_ORIGINS: List[AnyHttpUrl] = []
 
@@ -40,6 +59,7 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = "openai"  # gemini, openai, claude, qwen, deepseek, zhipu, moonshot, baidu, minimax, doubao, ollama
     LLM_API_KEY: Optional[str] = None
     LLM_MODEL: Optional[str] = None  # 不指定时使用provider的默认模型
+    MODEL_ALLOWED_ENDPOINTS: str = ""
     LLM_BASE_URL: Optional[str] = None  # 自定义API端点（如中转站）
     LLM_TIMEOUT: int = 150  # 超时时间（秒）
     LLM_TEMPERATURE: float = 0.1
@@ -70,9 +90,11 @@ class Settings(BaseSettings):
     
     # GitLab配置
     GITLAB_TOKEN: Optional[str] = None
+    GITLAB_ORIGIN: str = "https://gitlab.com"
     
     # Gitea配置
     GITEA_TOKEN: Optional[str] = None
+    GITEA_ORIGIN: Optional[str] = None
     
     # 扫描配置
     MAX_ANALYZE_FILES: int = 0  # 最大分析文件数，0表示无限制
@@ -81,6 +103,10 @@ class Settings(BaseSettings):
     LLM_GAP_MS: int = 2000  # LLM请求间隔（毫秒）
     
     # ZIP文件存储配置
+    ZIP_MAX_EXTRACTED_BYTES: int = Field(default=2 * 1024 * 1024 * 1024, gt=0)
+    ZIP_MAX_FILE_BYTES: int = Field(default=50 * 1024 * 1024, gt=0)
+    ZIP_MAX_ENTRIES: int = Field(default=50000, gt=0)
+    ZIP_MAX_COMPRESSION_RATIO: int = Field(default=200, gt=0)
     ZIP_STORAGE_PATH: str = "./uploads/zip_files"  # ZIP文件存储目录
     
     # 输出语言配置 - 支持 zh-CN（中文）和 en-US（英文）
@@ -124,6 +150,7 @@ class Settings(BaseSettings):
 
     class Config:
         case_sensitive = True
+        hide_input_in_errors = True
         env_file = ".env"
         extra = "ignore"  # 忽略额外的环境变量（如 VITE_* 前端变量）
 
